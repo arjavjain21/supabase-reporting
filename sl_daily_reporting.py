@@ -195,21 +195,35 @@ def load_client_mappings_from_cache() -> Dict[str, str]:
 # SmartLead API
 # ------------------------------
 rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_SECONDS)
+SMARTLEAD_BASE_URL = os.getenv("SMARTLEAD_BASE_URL", "https://server.smartlead.ai")
 
 def smartlead_get(path: str, params: Dict[str, Any] = None) -> Any:
+    """
+    Mirror original behavior:
+    - GET {BASE}/api/v1{path}
+    - api_key only as query param
+    - No pagination params added automatically
+    """
     import requests
     if not SMARTLEAD_API_KEY:
         raise RuntimeError("SMARTLEAD_API_KEY is not set")
-    params = params.copy() if params else {}
-    params["api_key"] = SMARTLEAD_API_KEY
-    url = f"https://server.smartlead.ai/api/v1{path}"
+    url = f"{SMARTLEAD_BASE_URL}/api/v1{path}"
+    q = dict(params or {})
+    q["api_key"] = SMARTLEAD_API_KEY
+
     last_err = None
     for attempt in range(1, HTTP_RETRIES + 1):
         rate_limiter.wait()
         try:
-            r = requests.get(url, params=params, timeout=45)
-            if r.status_code >= 500:
-                raise Exception(f"{r.status_code} {r.text[:100]}")
+            r = requests.get(
+                url,
+                params=q,
+                headers={"Accept": "application/json"},
+                timeout=45
+            )
+            # Retry on 5xx
+            if 500 <= r.status_code < 600:
+                raise Exception(f"{r.status_code} {r.text[:200]}")
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -220,47 +234,29 @@ def smartlead_get(path: str, params: Dict[str, Any] = None) -> Any:
     raise RuntimeError(f"SmartLead failed: {url} last_err={last_err}")
 
 def fetch_all_campaigns() -> List[Dict[str, Any]]:
-    # Try common pagination shapes
-    all_items: List[Dict[str, Any]] = []
-    page = 1
-    per_page = 200
-    max_pages = 200
-    while page <= max_pages:
-        data = smartlead_get("/campaigns", {"page": page, "limit": per_page})
-        # If API returns list
-        if isinstance(data, list):
-            all_items = data
-            break
-        # If API returns dict with data
-        items = []
-        next_hint = None
-        if isinstance(data, dict):
-            if "data" in data and isinstance(data["data"], list):
-                items = data["data"]
-            elif "items" in data and isinstance(data["items"], list):
-                items = data["items"]
-            # Inspect common next fields
-            for k in ("next", "next_page", "nextToken"):
-                if k in data:
-                    next_hint = data[k]
-                    break
-            # Inspect meta pagination
-            meta = data.get("meta") if isinstance(data, dict) else None
-            if meta and isinstance(meta, dict):
-                total_pages = meta.get("total_pages")
-                current_page = meta.get("page") or page
-                if total_pages and current_page >= total_pages:
-                    next_hint = None
-        if not items:
-            break
-        all_items.extend(items)
-        if next_hint in (None, False, "", 0):
-            break
-        page += 1
-    # Fallback if empty
-    if not all_items and isinstance(data, dict) and "data" in data:
-        all_items = data["data"]
-    return all_items
+    """
+    Original tenant behavior: /campaigns returns the full list without pagination.
+    Accept either a bare list or an object with 'data' or 'items'.
+    """
+    payload = smartlead_get("/campaigns")
+    if isinstance(payload, list):
+        logging.info(f"/campaigns returned list, count={len(payload)}")
+        return payload
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), list):
+            items = payload["data"]
+            logging.info(f"/campaigns returned dict.data, count={len(items)}")
+            return items
+        if isinstance(payload.get("items"), list):
+            items = payload["items"]
+            logging.info(f"/campaigns returned dict.items, count={len(items)}")
+            return items
+
+    # Defensive: if API shape is unexpected
+    logging.warning(f"/campaigns returned unexpected shape: type={type(payload)} keys={list(payload.keys()) if isinstance(payload, dict) else 'n/a'}")
+    return []
+
 
 def fetch_campaign_metrics(c: Dict[str, Any], start_date: str, end_date: str) -> Dict[str, int]:
     cid = c.get("id")
