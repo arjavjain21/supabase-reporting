@@ -424,20 +424,33 @@ def send_email(subject: str, body: str, log_path: str = None):
 # ------------------------------
 # Worker
 # ------------------------------
-def process_campaign(c: Dict[str, Any], client_map: Dict[str, str], start_date: str, end_date: str, pool) -> bool:
+def process_campaign(
+    c: Dict[str, Any],
+    client_map: Dict[str, str],
+    start_date: str,
+    end_date: str,
+    pool,
+    counter: Optional[List[int]] = None
+) -> bool:
     cid = str(c.get("id"))
     if not cid:
         return False
     try:
         metrics = fetch_campaign_metrics(c, start_date, end_date)
 
-        # Skip if there is no activity at all
+        # Skip pure zero-activity rows to reduce DB work
         if (
             metrics["total_email_sent"] == 0
             and metrics["replies_count"] == 0
             and metrics["new_leads_reached"] == 0
         ):
-            return True  # treat as processed successfully, but skip DB insert
+            logging.info(f"Skipping campaign {cid} (no activity in {start_date} to {end_date})")
+            # still counted as processed
+            if counter is not None:
+                counter[0] += 1
+                if counter[0] % 100 == 0:
+                    logging.info(f"Processed {counter[0]} campaigns so far")
+            return True
 
         client_id = str(c.get("client_id") or c.get("clientId") or "")
         client_name = client_map.get(client_id, client_id or "Unknown")
@@ -462,6 +475,13 @@ def process_campaign(c: Dict[str, Any], client_map: Dict[str, str], start_date: 
             upsert_row(conn, row)
         finally:
             pool.putconn(conn)
+
+        # Increment shared progress counter and log every 100
+        if counter is not None:
+            counter[0] += 1
+            if counter[0] % 100 == 0:
+                logging.info(f"Processed {counter[0]} campaigns so far")
+
         return True
     except Exception as e:
         logging.error(f"Campaign {cid} failed: {e}")
@@ -495,20 +515,24 @@ def main():
 
         # DB pool
         pool = init_pool()
-
+        
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        counter = [0]  # shared mutable counter for progress logs
         futures = []
         with ThreadPoolExecutor(max_workers=WORKER_THREADS) as ex:
             for c in campaigns:
-                futures.append(ex.submit(process_campaign, c, client_map, start_date, end_date, pool))
+                futures.append(ex.submit(process_campaign, c, client_map, start_date, end_date, pool, counter))
             for fut in as_completed(futures):
                 ok = fut.result()
                 if ok:
                     successes += 1
                 else:
-                    # Not all responses include id, so append None-safe
-                    # We will not try to requeue here
                     pass
+        
+        processed = counter[0]
+        failures = total - successes
+        logging.info(f"Finished processing {processed} campaigns (successful: {successes}, failed: {failures})")
+
         elapsed = time.time() - start_time
         summary = (
             f"Execution Summary\n"
