@@ -134,6 +134,22 @@ def today_range_in_tz(tz_name: str) -> Tuple[str, str]:
     d = yesterday.strftime("%Y-%m-%d")
     return d, d
 
+def resolve_date_range(tz_name: str) -> Tuple[str, str]:
+    sd = os.getenv("START_DATE", "").strip()
+    ed = os.getenv("END_DATE", "").strip()
+    if sd and not ed:
+        ed = sd
+    if sd and ed:
+        # simple validation, YYYY-MM-DD
+        try:
+            datetime.strptime(sd, "%Y-%m-%d")
+            datetime.strptime(ed, "%Y-%m-%d")
+            return sd, ed
+        except Exception:
+            logging.warning("Invalid START_DATE or END_DATE format, falling back to yesterday")
+    return today_range_in_tz(tz_name)
+
+
 # ------------------------------
 # Google Sheets client map (optional)
 # ------------------------------
@@ -459,7 +475,8 @@ def main():
             client_map = load_client_mappings_from_cache()
 
         # Date range
-        start_date, end_date = today_range_in_tz(REPORT_TZ)
+        start_date, end_date = resolve_date_range(REPORT_TZ)
+        #start_date, end_date = today_range_in_tz(REPORT_TZ)
 
         # Fetch campaigns with pagination
         campaigns = fetch_all_campaigns()
