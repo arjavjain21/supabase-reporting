@@ -430,6 +430,15 @@ def process_campaign(c: Dict[str, Any], client_map: Dict[str, str], start_date: 
         return False
     try:
         metrics = fetch_campaign_metrics(c, start_date, end_date)
+
+        # Skip if there is no activity at all
+        if (
+            metrics["total_email_sent"] == 0
+            and metrics["replies_count"] == 0
+            and metrics["new_leads_reached"] == 0
+        ):
+            return True  # treat as processed successfully, but skip DB insert
+
         client_id = str(c.get("client_id") or c.get("clientId") or "")
         client_name = client_map.get(client_id, client_id or "Unknown")
         row = {
@@ -457,6 +466,7 @@ def process_campaign(c: Dict[str, Any], client_map: Dict[str, str], start_date: 
     except Exception as e:
         logging.error(f"Campaign {cid} failed: {e}")
         return False
+
 
 # ------------------------------
 # Main
