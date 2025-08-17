@@ -2,8 +2,15 @@ name: Daily Smartlead Reporting
 
 on:
   schedule:
-    - cron: '40 20 * * *'   # runs at 02:10 IST daily
+    - cron: '40 20 * * *'   # 02:10 IST daily
   workflow_dispatch:
+    inputs:
+      start:
+        description: 'Start date YYYY-MM-DD (optional)'
+        required: false
+      end:
+        description: 'End date YYYY-MM-DD (optional)'
+        required: false
 
 jobs:
   run:
@@ -19,6 +26,11 @@ jobs:
       RATE_LIMIT_SECONDS: ${{ vars.RATE_LIMIT_SECONDS }}
       SHEET_DOCUMENT_ID: ${{ vars.SHEET_DOCUMENT_ID }}
       SHEET_RANGE: ${{ vars.SHEET_RANGE }}
+
+      # Manual backfill path with inputs
+      START_DATE: ${{ github.event.inputs.start }}
+      END_DATE: ${{ github.event.inputs.end }}
+      
       # sensitive repo Secrets
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       SMARTLEAD_API_KEY: ${{ secrets.SMARTLEAD_API_KEY }}
