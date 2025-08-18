@@ -2,7 +2,7 @@ name: Daily Pipl Reporting
 
 on:
   schedule:
-    - cron: '5 4 * * *'   # 00:05 EDT daily
+    - cron: '1 4 * * *'   # 00:05 EDT daily
   workflow_dispatch:
     inputs:
       start_date:
@@ -16,7 +16,7 @@ jobs:
   run-pipl:
     runs-on: ubuntu-latest
     concurrency:
-      group: pipl-smartlead  # prevent overlap
+      group: daily-smartlead-pipl  # prevent overlap with SL
       cancel-in-progress: false
     env:
       REPORT_TZ: ${{ vars.REPORT_TZ }}
