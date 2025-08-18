@@ -1,0 +1,42 @@
+name: Manual PV Backfill (loop)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: 'Start date YYYY-MM-DD'
+        required: true
+      end:
+        description: 'End date YYYY-MM-DD'
+        required: true
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pv-backfill
+      cancel-in-progress: false
+    env:
+      REPORT_TZ: ${{ vars.REPORT_TZ }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      PLUSVIBE_API_KEY: ${{ secrets.PLUSVIBE_API_KEY }}
+      PV_VERIFY_SSL: ${{ vars.PV_VERIFY_SSL }}
+      PV_BASE_URL:   ${{ vars.PV_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run PV backfill range
+        run: |
+          python backfill_pipl_range.py "${{ github.event.inputs.start }}" "${{ github.event.inputs.end }}"
