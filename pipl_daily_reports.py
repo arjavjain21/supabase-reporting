@@ -26,7 +26,11 @@ SUPABASE_DB_URL   = os.getenv("SUPABASE_DB_URL")
 PLUSVIBE_API_KEY  = os.getenv("PLUSVIBE_API_KEY", "").strip()
 REPORT_TZ         = os.getenv("REPORT_TZ", "America/New_York")
 PV_VERIFY_SSL     = os.getenv("PV_VERIFY_SSL", "true").strip().lower() not in ("0", "false", "no")
-PV_BASE_URL       = os.getenv("PV_BASE_URL", "https://api.plusvibe.ai/api/v1").rstrip("/")
+_raw_base = os.getenv("PV_BASE_URL", "").strip()
+if not _raw_base:
+    _raw_base = "https://api.plusvibe.ai/api/v1"
+PV_BASE_URL = _raw_base.rstrip("/")
+
 
 if not SUPABASE_DB_URL or not PLUSVIBE_API_KEY:
     logging.error("Missing required env vars: SUPABASE_DB_URL or PLUSVIBE_API_KEY")
