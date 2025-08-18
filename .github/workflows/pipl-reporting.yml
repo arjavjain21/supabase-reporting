@@ -1,0 +1,43 @@
+name: Daily Pipl Reporting
+
+on:
+  schedule:
+    - cron: '5 4 * * *'   # 00:05 EDT daily
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Start date YYYY-MM-DD'
+        required: false
+      end_date:
+        description: 'End date YYYY-MM-DD'
+        required: false
+
+jobs:
+  run-pipl:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pipl-smartlead  # prevent overlap
+      cancel-in-progress: false
+    env:
+      REPORT_TZ: ${{ vars.REPORT_TZ }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      PLUSVIBE_API_KEY: ${{ secrets.PLUSVIBE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+      - name: Run Pipl daily reporting
+        run: |
+          python pipl_daily_reports.py \
+            --start ${{ github.event.inputs.start_date || '' }} \
+            --end   ${{ github.event.inputs.end_date || '' }}
