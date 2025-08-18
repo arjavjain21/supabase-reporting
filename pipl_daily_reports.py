@@ -30,7 +30,7 @@ if not SUPABASE_DB_URL or not PLUSVIBE_API_KEY:
     sys.exit(1)
 
 HEADERS = {"api-key": PLUSVIBE_API_KEY}
-BASE_URL = "https://piplapi.plusvibe.ai/api/v1/report"
+BASE_URL = "https://api.plusvibe.ai/api/v1/report"
 
 # -------------------------------
 # Date range
