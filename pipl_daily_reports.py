@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import urllib3
 import sys
 import argparse
 import logging
@@ -30,6 +31,9 @@ _raw_base = os.getenv("PV_BASE_URL", "").strip()
 if not _raw_base:
     _raw_base = "https://api.plusvibe.ai/api/v1"
 PV_BASE_URL = _raw_base.rstrip("/")
+if not PV_VERIFY_SSL:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 
 if not SUPABASE_DB_URL or not PLUSVIBE_API_KEY:
@@ -142,44 +146,69 @@ def fetch_campaign_metrics(ws_id: str, cid: str, start_date: str, end_date: Opti
         params["end_date"] = end_date
     data = _get_json(STATS_PATH, params)
 
-    # Normalize shapes:
-    # - dict with keys directly: {"sent": 10, "replies": 2, ...}
-    # - dict wrapper: {"data": {...}} or {"result": {...}}
-    # - list of daily buckets: [{"sent": 5, ...}, {"sent": 5, ...}]
-    # - list wrapped under a key: {"data": [ ... ]}
-
-    # unwrap one level if common wrapper
+    # unwrap one level if wrapped
     candidate = data
     if isinstance(candidate, dict):
-        for key in ("data", "result", "stats"):
+        for key in ("data", "result", "stats", "payload"):
             if key in candidate:
                 candidate = candidate[key]
                 break
-    logging.debug(f"Metrics list for {cid}, len={len(candidate)}. Summing buckets.")
 
-    # if list, sum across elements
+    # If the API returns a list of per-day or per-step buckets, sum them
     if isinstance(candidate, list):
+        buckets = candidate
+    elif isinstance(candidate, dict) and isinstance(candidate.get("daily"), list):
+        buckets = candidate["daily"]
+    else:
+        buckets = None
+
+    def to_int(v):
+        try:
+            return int(v)
+        except Exception:
+            try:
+                return int(float(v))
+            except Exception:
+                return 0
+
+    # alias map per metric
+    alias = {
+        "sent":       ["sent", "emails_sent", "emailsSent", "total_sent"],
+        "new_leads":  ["new_leads", "newLeads", "new_contacts", "newContacts"],
+        "replies":    ["replies", "reply", "total_replies", "totalReplies"],
+        "positive":   ["positive", "positive_replies", "positiveReplies"],
+        "bounces":    ["bounces", "bounce", "bounced", "bounceCount", "bouncedCount"],
+    }
+
+    def extract_from_dict(d: dict) -> Dict[str, int]:
+        out = {"sent": 0, "new_leads": 0, "replies": 0, "positive": 0, "bounces": 0}
+        for k, names in alias.items():
+            for n in names:
+                if n in d:
+                    out[k] = to_int(d.get(n))
+                    break
+        return out
+
+    if buckets is not None:
         agg = {"sent": 0, "new_leads": 0, "replies": 0, "positive": 0, "bounces": 0}
-        for item in candidate:
+        for item in buckets:
             if isinstance(item, dict):
-                agg["sent"]      += int(item.get("sent", 0))
-                agg["new_leads"] += int(item.get("new_leads", 0))
-                agg["replies"]   += int(item.get("replies", 0))
-                agg["positive"]  += int(item.get("positive", 0))
-                agg["bounces"]   += int(item.get("bounces", 0))
-        candidate = agg
+                vals = extract_from_dict(item)
+                for k in agg:
+                    agg[k] += vals[k]
+        chosen = agg
+    elif isinstance(candidate, dict):
+        chosen = extract_from_dict(candidate)
+    else:
+        # Unknown shape: fail loud with short preview
+        raise RuntimeError(f"Unexpected metrics shape for {cid}: {type(candidate).__name__}")
 
-    # if still not dict, hard fail with short preview to catch schema changes
-    if not isinstance(candidate, dict):
-        raise RuntimeError(f"Unexpected metrics shape for {cid}: {str(type(candidate))[:64]}")
-
-    # final normalize to our columns
     return {
-        "total_email_sent": int(candidate.get("sent", 0)),
-        "new_leads_reached": int(candidate.get("new_leads", 0)),
-        "replies_count": int(candidate.get("replies", 0)),
-        "positive_reply": int(candidate.get("positive", 0)),
-        "bounce_count": int(candidate.get("bounces", 0)),
+        "total_email_sent": chosen["sent"],
+        "new_leads_reached": chosen["new_leads"],
+        "replies_count": chosen["replies"],
+        "positive_reply": chosen["positive"],
+        "bounce_count": chosen["bounces"],
     }
 
 
@@ -231,11 +260,21 @@ def main(start_date: str, end_date: str):
 
                 for camp in camps:
                     try:
-                        cid = str(camp.get("id") or camp.get("campaign_id") or "").strip()
+                        cid = str(camp.get("id") or camp.get("campaign_id") or camp.get("_id") or "").strip()
                         if not cid:
                             continue
 
                         metrics = fetch_campaign_metrics(ws_id, cid, start_date, end_date)
+                        if (
+                            metrics["total_email_sent"] == 0
+                            and metrics["replies_count"] == 0
+                            and metrics["new_leads_reached"] == 0
+                        ):
+                            # one lightweight peek at the raw shape to help debug schemas that return zeros
+                            if processed < 3:  # do not spam
+                                logging.info(f"Zeroed metrics for campaign {cid} in ws {ws_name}. If unexpected, the API may be using different keys.")
+                            skipped += 1
+                            continue
 
                         # Metrics must be ints. If any unexpected type slips through, coerce or raise.
                         for k in ("total_email_sent", "new_leads_reached", "replies_count", "positive_reply", "bounce_count"):
