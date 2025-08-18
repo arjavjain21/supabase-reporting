@@ -83,7 +83,7 @@ def pv_get(path, params=None):
     base_url = "https://api.plusvibe.ai/api/v1"
     headers = {"api-key": PLUSVIBE_API_KEY}
     url = f"{base_url}{path}"
-    resp = requests.get(url, headers=headers, params=params, timeout=60)
+    resp = requests.get(url, headers=headers, params=params, timeout=60, verify=False)
     if resp.status_code != 200:
         raise RuntimeError(f"PV API error {resp.status_code}: {resp.text[:200]}")
     return resp.json()
@@ -161,12 +161,9 @@ def main(start_date: str, end_date: str):
         except Exception as e:
             logging.error(f"Campaign {c.get('id')} failed: {e}")
 
-    if rows:
-        conn = pool.getconn()
-        try:
-            upsert_rows(conn, rows)
-        finally:
-            pool.putconn(conn)
+    with psycopg2.connect(SUPABASE_DB_URL) as conn:
+        upsert_rows(conn, rows)
+
     logging.info(f"Finished. Inserted/updated {processed} campaigns, skipped {skipped}")
 
 # -------------------------------
