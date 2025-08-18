@@ -165,10 +165,14 @@ def main(start_date: str, end_date: str):
 
     with psycopg2.connect(SUPABASE_DB_URL) as conn:
         for ws in workspaces:
-            ws_id = str(ws.get("id") or ws.get("workspace_id") or "").strip()
+            # PV returns _id for workspaces. Use that when present.
+            ws_id = str(ws.get("id") or ws.get("workspace_id") or ws.get("_id") or "").strip()
             ws_name = ws.get("name") or ws.get("workspace_name") or "Unknown"
+            logging.info(f"Workspace: name={ws_name} id={ws_id}")
             if not ws_id:
-                logging.warning(f"Skipping workspace without id: {ws}")
+                logging.warning(f"Workspace has no usable id fields, emitting name only: {ws_name}")
+                # still proceed with name-only if the API allows listing without id; otherwise continue
+
                 continue
 
             skip = 0
