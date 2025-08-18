@@ -22,6 +22,7 @@ jobs:
       REPORT_TZ: ${{ vars.REPORT_TZ }}
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       PLUSVIBE_API_KEY: ${{ secrets.PLUSVIBE_API_KEY }}
+      PV_VERIFY_SSL: ${{ vars.PV_VERIFY_SSL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
