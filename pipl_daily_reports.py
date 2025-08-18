@@ -6,12 +6,11 @@ import logging
 from datetime import datetime, timedelta
 import requests
 import psycopg2
-from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import execute_values
 import pytz
 
 # -------------------------------
-# Logging setup
+# Logging
 # -------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -20,35 +19,33 @@ logging.basicConfig(
 )
 
 # -------------------------------
-# Config from environment
+# Env vars
 # -------------------------------
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL")
 PLUSVIBE_API_KEY = os.environ.get("PLUSVIBE_API_KEY")
-REPORT_TZ = os.environ.get("REPORT_TZ", "America/New_York")  # default: EDT
-WORKER_THREADS = int(os.environ.get("WORKER_THREADS", "8"))
+REPORT_TZ = os.environ.get("REPORT_TZ", "America/New_York")
 
 if not SUPABASE_DB_URL or not PLUSVIBE_API_KEY:
     logging.error("Missing required env vars: SUPABASE_DB_URL or PLUSVIBE_API_KEY")
     sys.exit(1)
 
+HEADERS = {"api-key": PLUSVIBE_API_KEY}
+BASE_URL = "https://piplapi.plusvibe.ai/api/v1/report"
+
 # -------------------------------
-# Date utilities
+# Date range
 # -------------------------------
-def resolve_date_range(start_arg: str, end_arg: str):
+def resolve_date_range(start_arg, end_arg):
     tz = pytz.timezone(REPORT_TZ)
     today = datetime.now(tz).date()
     if start_arg and end_arg:
         return start_arg, end_arg
-    # default: yesterday
     yday = today - timedelta(days=1)
     return yday.isoformat(), yday.isoformat()
 
 # -------------------------------
-# Database setup
+# DB helpers
 # -------------------------------
-def init_pool():
-    return ThreadedConnectionPool(1, max(WORKER_THREADS, 8), SUPABASE_DB_URL)
-
 def upsert_rows(conn, rows):
     if not rows:
         return
@@ -77,27 +74,23 @@ def upsert_rows(conn, rows):
     conn.commit()
 
 # -------------------------------
-# API calls
+# API
 # -------------------------------
-def pv_get(path, params=None):
-    base_url = "https://api.plusvibe.ai/api/v1"
-    headers = {"api-key": PLUSVIBE_API_KEY}
-    url = f"{base_url}{path}"
-    resp = requests.get(url, headers=headers, params=params, timeout=60, verify=False)
+def fetch_campaigns():
+    url = f"{BASE_URL}/campaigns"
+    resp = requests.get(url, headers=HEADERS, timeout=60, verify=False)  # disable SSL check if cert issue
     if resp.status_code != 200:
         raise RuntimeError(f"PV API error {resp.status_code}: {resp.text[:200]}")
-    return resp.json()
+    data = resp.json()
+    return data.get("campaigns", [])
 
-def fetch_campaigns():
-    data = pv_get("/campaigns")
-    if isinstance(data, dict) and "campaigns" in data:
-        return data["campaigns"]
-    if isinstance(data, list):
-        return data
-    return []
-
-def fetch_campaign_metrics(cid: str, start_date: str, end_date: str):
-    data = pv_get(f"/campaigns/{cid}/metrics", {"start_date": start_date, "end_date": end_date})
+def fetch_campaign_metrics(cid, start_date, end_date):
+    url = f"{BASE_URL}/campaigns/{cid}/stats"
+    params = {"start_date": start_date, "end_date": end_date}
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=60, verify=False)
+    if resp.status_code != 200:
+        raise RuntimeError(f"PV metrics error {resp.status_code} for {cid}: {resp.text[:200]}")
+    data = resp.json()
     return {
         "total_email_sent": int(data.get("sent", 0)),
         "new_leads_reached": int(data.get("new_leads", 0)),
@@ -107,72 +100,67 @@ def fetch_campaign_metrics(cid: str, start_date: str, end_date: str):
     }
 
 # -------------------------------
-# Main processing
+# Main
 # -------------------------------
-def main(start_date: str, end_date: str):
+def main(start_date, end_date):
     logging.info(f"Fetching Pipl campaigns for {start_date} → {end_date}")
     campaigns = fetch_campaigns()
-    logging.info(f"/campaigns returned {len(campaigns)} campaigns")
+    logging.info(f"Fetched {len(campaigns)} campaigns")
 
-    pool = init_pool()
-    rows = []
-    processed = 0
-    skipped = 0
-
-    for c in campaigns:
-        try:
-            cid = str(c.get("id") or c.get("campaign_id") or "").strip()
-            if not cid:
-                continue
-            metrics = fetch_campaign_metrics(cid, start_date, end_date)
-
-            # skip zero-activity
-            if (
-                metrics["total_email_sent"] <= 0
-                and metrics["replies_count"] <= 0
-                and metrics["new_leads_reached"] <= 0
-            ):
-                skipped += 1
-                logging.debug(f"Skipping campaign {cid} (no activity)")
-                continue
-
-            row = (
-                f"{start_date}_{cid}_{end_date}",  # campaign_date_key
-                cid,
-                c.get("parent_campaign_id") or None,
-                c.get("name") or "",
-                c.get("ws_name") or "Unknown",  # direct client name
-                c.get("status") or "",
-                start_date,
-                end_date,
-                metrics["total_email_sent"],
-                metrics["new_leads_reached"],
-                metrics["replies_count"],
-                metrics["positive_reply"],
-                metrics["bounce_count"],
-                "PV",  # sequencer_platform
-            )
-            rows.append(row)
-            processed += 1
-
-            if processed % 100 == 0:
-                logging.info(f"Processed {processed} campaigns (skipped {skipped})")
-
-        except Exception as e:
-            logging.error(f"Campaign {c.get('id')} failed: {e}")
-
+    rows, processed, skipped = [], 0, 0
     with psycopg2.connect(SUPABASE_DB_URL) as conn:
-        upsert_rows(conn, rows)
+        for c in campaigns:
+            try:
+                cid = str(c.get("id") or "").strip()
+                if not cid:
+                    continue
+                metrics = fetch_campaign_metrics(cid, start_date, end_date)
 
-    logging.info(f"Finished. Inserted/updated {processed} campaigns, skipped {skipped}")
+                if (
+                    metrics["total_email_sent"] <= 0
+                    and metrics["replies_count"] <= 0
+                    and metrics["new_leads_reached"] <= 0
+                ):
+                    skipped += 1
+                    continue
+
+                row = (
+                    f"{start_date}_{cid}_{end_date}",
+                    cid,
+                    c.get("parent_campaign_id"),
+                    c.get("name") or "",
+                    c.get("ws_name") or "Unknown",
+                    c.get("status") or "",
+                    start_date,
+                    end_date,
+                    metrics["total_email_sent"],
+                    metrics["new_leads_reached"],
+                    metrics["replies_count"],
+                    metrics["positive_reply"],
+                    metrics["bounce_count"],
+                    "PV",
+                )
+                rows.append(row)
+                processed += 1
+
+                if processed % 100 == 0:
+                    logging.info(f"Processed {processed} campaigns (skipped {skipped})")
+
+            except Exception as e:
+                logging.error(f"Campaign {c.get('id')} failed: {e}")
+
+        if rows:
+            upsert_rows(conn, rows)
+
+    logging.info(f"Finished. Inserted/updated {processed}, skipped {skipped}")
 
 # -------------------------------
-# CLI entrypoint
+# Entrypoint
 # -------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--start", help="Start date YYYY-MM-DD")
-    parser.add_argument("--end", help="End date YYYY-MM-DD")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
     args = parser.parse_args()
 
     start_date, end_date = resolve_date_range(args.start, args.end)
