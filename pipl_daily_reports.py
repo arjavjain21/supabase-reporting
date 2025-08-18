@@ -4,6 +4,7 @@ import sys
 import argparse
 import logging
 from datetime import datetime, timedelta
+from typing import List, Dict, Tuple, Optional
 import requests
 import psycopg2
 from psycopg2.extras import execute_values
@@ -22,21 +23,30 @@ logging.basicConfig(
 # Env config
 # -------------------------------
 SUPABASE_DB_URL   = os.getenv("SUPABASE_DB_URL")
-PLUSVIBE_API_KEY  = os.getenv("PLUSVIBE_API_KEY")
+PLUSVIBE_API_KEY  = os.getenv("PLUSVIBE_API_KEY", "").strip()
 REPORT_TZ         = os.getenv("REPORT_TZ", "America/New_York")
-PV_VERIFY_SSL     = os.getenv("PV_VERIFY_SSL", "true").lower() not in ("0", "false", "no")  # toggle if their cert chain is broken
+PV_VERIFY_SSL     = os.getenv("PV_VERIFY_SSL", "true").strip().lower() not in ("0", "false", "no")
+PV_BASE_URL       = os.getenv("PV_BASE_URL", "https://api.plusvibe.ai/api/v1").rstrip("/")
 
 if not SUPABASE_DB_URL or not PLUSVIBE_API_KEY:
     logging.error("Missing required env vars: SUPABASE_DB_URL or PLUSVIBE_API_KEY")
     sys.exit(1)
 
-HEADERS  = {"x-api-key": PLUSVIBE_API_KEY}
-BASE_URL = "https://api.plusvibe.ai/api/v1"  # correct base
+# try both header conventions
+HEADERS_CANDIDATES = [
+    {"x-api-key": PLUSVIBE_API_KEY},
+    {"api-key": PLUSVIBE_API_KEY},
+]
+
+# candidate endpoints by tenant
+WORKSPACES_PATHS = ["/authenticate", "/workspaces"]
+CAMPAIGNS_PATH   = "/campaign/list-all"  # observed working
+STATS_PATH       = "/analytics/campaign/stats"  # observed working
 
 # -------------------------------
 # Dates
 # -------------------------------
-def resolve_date_range(start_arg: str | None, end_arg: str | None) -> tuple[str, str]:
+def resolve_date_range(start_arg: Optional[str], end_arg: Optional[str]) -> Tuple[str, str]:
     tz = pytz.timezone(REPORT_TZ)
     today = datetime.now(tz).date()
     if start_arg and end_arg:
@@ -47,7 +57,7 @@ def resolve_date_range(start_arg: str | None, end_arg: str | None) -> tuple[str,
 # -------------------------------
 # DB
 # -------------------------------
-def upsert_rows(conn, rows: list[tuple]):
+def upsert_rows(conn, rows: List[tuple]):
     if not rows:
         return
     with conn.cursor() as cur:
@@ -75,34 +85,58 @@ def upsert_rows(conn, rows: list[tuple]):
     conn.commit()
 
 # -------------------------------
-# PV API
+# HTTP helpers
 # -------------------------------
-def pv_get(path: str, params: dict | None = None) -> dict | list:
-    url = f"{BASE_URL}{path}"
-    r = requests.get(url, headers=HEADERS, params=params or {}, timeout=60, verify=PV_VERIFY_SSL)
-    if r.status_code != 200:
-        raise RuntimeError(f"PV API error {r.status_code}: {r.text[:200]}")
-    return r.json()
+def _get_json(path: str, params: Dict = None) -> Dict:
+    url = f"{PV_BASE_URL}{path}"
+    last_err = None
+    for hdr in HEADERS_CANDIDATES:
+        try:
+            r = requests.get(url, headers=hdr, params=params or {}, timeout=60, verify=PV_VERIFY_SSL)
+            if r.status_code != 200:
+                last_err = RuntimeError(f"{r.status_code} {r.text[:200]}")
+                continue
+            logging.debug(f"GET {path} ok with headers {list(hdr.keys())[0]}")
+            return r.json()
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"GET {path} failed. last_err={last_err}")
 
-def get_workspaces() -> list[dict]:
-    # returns: {"workspaces": [ {id, name, ...}, ... ]}
-    data = pv_get("/authenticate")
-    if isinstance(data, dict):
-        return data.get("workspaces", [])
+# -------------------------------
+# PV API with fallbacks
+# -------------------------------
+def get_workspaces() -> List[Dict]:
+    for p in WORKSPACES_PATHS:
+        try:
+            data = _get_json(p)
+            # shapes seen: {"workspaces":[{id,name,...},...]} or list of workspaces
+            if isinstance(data, dict) and "workspaces" in data and isinstance(data["workspaces"], list):
+                logging.info(f"Workspaces from {p}: {len(data['workspaces'])}")
+                return data["workspaces"]
+            if isinstance(data, list):
+                logging.info(f"Workspaces from {p}: {len(data)}")
+                return data
+        except Exception as e:
+            logging.warning(f"Workspace fetch via {p} failed: {e}")
     return []
 
-def list_campaigns(ws_id: str, skip: int = 0, limit: int = 100) -> list[dict]:
-    data = pv_get("/campaign/list-all", {"workspace_id": ws_id, "skip": skip, "limit": limit})
-    # API returns list of campaigns
-    return data if isinstance(data, list) else []
+def list_campaigns(ws_id: str, skip: int = 0, limit: int = 100) -> List[Dict]:
+    params = {"workspace_id": ws_id, "skip": skip, "limit": limit}
+    data = _get_json(CAMPAIGNS_PATH, params)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        # tolerate shapes like {"campaigns":[...]} if tenant returns wrapped lists
+        if isinstance(data.get("campaigns"), list):
+            return data["campaigns"]
+    return []
 
-def fetch_campaign_metrics(ws_id: str, cid: str, start_date: str, end_date: str | None) -> dict:
+def fetch_campaign_metrics(ws_id: str, cid: str, start_date: str, end_date: Optional[str]) -> Dict[str, int]:
     params = {"workspace_id": ws_id, "campaign_id": cid, "start_date": start_date}
     if end_date:
         params["end_date"] = end_date
-    data = pv_get("/analytics/campaign/stats", params)
-    # API can return dict of counts or a dict keyed by metric
-    # Normalize with .get defaults and cast to int
+    data = _get_json(STATS_PATH, params)
     return {
         "total_email_sent": int(data.get("sent", 0)),
         "new_leads_reached": int(data.get("new_leads", 0)),
@@ -116,28 +150,41 @@ def fetch_campaign_metrics(ws_id: str, cid: str, start_date: str, end_date: str 
 # -------------------------------
 def main(start_date: str, end_date: str):
     logging.info(f"Fetching Pipl campaigns for {start_date} to {end_date}")
+    if not PV_VERIFY_SSL:
+        logging.warning("PV_VERIFY_SSL=false. TLS verification is disabled")
 
     workspaces = get_workspaces()
+    logging.info(f"Total workspaces discovered: {len(workspaces)}")
     if not workspaces:
-        raise RuntimeError("No workspaces returned by PV. Check PLUSVIBE_API_KEY")
+        raise RuntimeError("PV returned zero workspaces. Check API key, base URL, or header name")
 
-    rows = []
+    rows: List[tuple] = []
     processed = 0
     skipped = 0
+    total_campaigns_seen = 0
 
     with psycopg2.connect(SUPABASE_DB_URL) as conn:
         for ws in workspaces:
             ws_id = str(ws.get("id") or ws.get("workspace_id") or "").strip()
-            ws_name = ws.get("name") or "Unknown"
+            ws_name = ws.get("name") or ws.get("workspace_name") or "Unknown"
             if not ws_id:
+                logging.warning(f"Skipping workspace without id: {ws}")
                 continue
 
-            # paginate campaigns
             skip = 0
             batch = 100
             while True:
-                camps = list_campaigns(ws_id, skip=skip, limit=batch)
-                if not camps:
+                try:
+                    camps = list_campaigns(ws_id, skip=skip, limit=batch)
+                except Exception as e:
+                    logging.error(f"Failed listing campaigns for workspace {ws_id}: {e}")
+                    break
+
+                count = len(camps)
+                total_campaigns_seen += count
+                logging.info(f"Workspace {ws_name} ({ws_id}) campaigns batch size={count} skip={skip}")
+
+                if count == 0:
                     break
 
                 for camp in camps:
@@ -148,7 +195,6 @@ def main(start_date: str, end_date: str):
 
                         metrics = fetch_campaign_metrics(ws_id, cid, start_date, end_date)
 
-                        # skip pure zero activity
                         if (
                             metrics["total_email_sent"] == 0
                             and metrics["replies_count"] == 0
@@ -158,11 +204,11 @@ def main(start_date: str, end_date: str):
                             continue
 
                         row = (
-                            f"{start_date}_{cid}_{end_date}",  # campaign_date_key aligned with SL
+                            f"{start_date}_{cid}_{end_date}",
                             cid,
-                            camp.get("parent_campaign_id"),  # often None on PV
+                            camp.get("parent_campaign_id"),
                             camp.get("name") or "",
-                            ws_name,                          # direct mapping by workspace name
+                            ws_name,
                             camp.get("status") or "",
                             start_date,
                             end_date,
@@ -175,21 +221,19 @@ def main(start_date: str, end_date: str):
                         )
                         rows.append(row)
                         processed += 1
-
                         if processed % 100 == 0:
                             logging.info(f"Processed {processed} PV campaigns so far (skipped {skipped})")
-
                     except Exception as e:
                         logging.error(f"PV campaign {camp.get('id')} failed: {e}")
 
-                if len(camps) < batch:
+                if count < batch:
                     break
                 skip += batch
 
         if rows:
             upsert_rows(conn, rows)
 
-    logging.info(f"Finished PV. Inserted or updated {processed}, skipped {skipped}")
+    logging.info(f"Finished PV. Workspaces={len(workspaces)}, campaigns_seen={total_campaigns_seen}, inserted_or_updated={processed}, skipped={skipped}")
 
 # -------------------------------
 # Entrypoint
