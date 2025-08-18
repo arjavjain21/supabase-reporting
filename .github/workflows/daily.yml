@@ -2,7 +2,7 @@ name: Daily Smartlead Reporting
 
 on:
   schedule:
-    - cron: '40 20 * * *'   # 02:10 IST daily
+    - cron: '5 4 * * *'   # 00:05 EDT daily
   workflow_dispatch:
     inputs:
       start:
