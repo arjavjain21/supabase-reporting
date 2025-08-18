@@ -141,13 +141,47 @@ def fetch_campaign_metrics(ws_id: str, cid: str, start_date: str, end_date: Opti
     if end_date:
         params["end_date"] = end_date
     data = _get_json(STATS_PATH, params)
+
+    # Normalize shapes:
+    # - dict with keys directly: {"sent": 10, "replies": 2, ...}
+    # - dict wrapper: {"data": {...}} or {"result": {...}}
+    # - list of daily buckets: [{"sent": 5, ...}, {"sent": 5, ...}]
+    # - list wrapped under a key: {"data": [ ... ]}
+
+    # unwrap one level if common wrapper
+    candidate = data
+    if isinstance(candidate, dict):
+        for key in ("data", "result", "stats"):
+            if key in candidate:
+                candidate = candidate[key]
+                break
+    logging.debug(f"Metrics list for {cid}, len={len(candidate)}. Summing buckets.")
+
+    # if list, sum across elements
+    if isinstance(candidate, list):
+        agg = {"sent": 0, "new_leads": 0, "replies": 0, "positive": 0, "bounces": 0}
+        for item in candidate:
+            if isinstance(item, dict):
+                agg["sent"]      += int(item.get("sent", 0))
+                agg["new_leads"] += int(item.get("new_leads", 0))
+                agg["replies"]   += int(item.get("replies", 0))
+                agg["positive"]  += int(item.get("positive", 0))
+                agg["bounces"]   += int(item.get("bounces", 0))
+        candidate = agg
+
+    # if still not dict, hard fail with short preview to catch schema changes
+    if not isinstance(candidate, dict):
+        raise RuntimeError(f"Unexpected metrics shape for {cid}: {str(type(candidate))[:64]}")
+
+    # final normalize to our columns
     return {
-        "total_email_sent": int(data.get("sent", 0)),
-        "new_leads_reached": int(data.get("new_leads", 0)),
-        "replies_count": int(data.get("replies", 0)),
-        "positive_reply": int(data.get("positive", 0)),
-        "bounce_count": int(data.get("bounces", 0)),
+        "total_email_sent": int(candidate.get("sent", 0)),
+        "new_leads_reached": int(candidate.get("new_leads", 0)),
+        "replies_count": int(candidate.get("replies", 0)),
+        "positive_reply": int(candidate.get("positive", 0)),
+        "bounce_count": int(candidate.get("bounces", 0)),
     }
+
 
 # -------------------------------
 # Main
@@ -203,6 +237,14 @@ def main(start_date: str, end_date: str):
 
                         metrics = fetch_campaign_metrics(ws_id, cid, start_date, end_date)
 
+                        # Metrics must be ints. If any unexpected type slips through, coerce or raise.
+                        for k in ("total_email_sent", "new_leads_reached", "replies_count", "positive_reply", "bounce_count"):
+                            try:
+                                metrics[k] = int(metrics.get(k, 0))
+                            except Exception:
+                                raise RuntimeError(f"Non-integer metric {k} for campaign {cid}: {metrics.get(k)}")
+
+
                         if (
                             metrics["total_email_sent"] == 0
                             and metrics["replies_count"] == 0
@@ -227,6 +269,10 @@ def main(start_date: str, end_date: str):
                             metrics["bounce_count"],
                             "PV",
                         )
+                        
+                        if processed % 100 == 0:
+                            logging.info(f"Prepared rows: {processed}, skipped {skipped}")
+
                         rows.append(row)
                         processed += 1
                         if processed % 100 == 0:
