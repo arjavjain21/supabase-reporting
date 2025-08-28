@@ -1,345 +1,403 @@
 #!/usr/bin/env python3
-import os
-import urllib3
+"""
+Pipl → Supabase Campaign Reporting Script
+
+Fetches Pipl campaign stats for a single date (default: yesterday in IST)
+or for a hard‑coded date range, and upserts them into the Supabase
+`public.campaign_reporting` table via INSERT … ON CONFLICT.
+
+Usage:
+  • By default, runs for yesterday in Asia/Kolkata time.
+  • To run for a custom date range, uncomment the "BULK RANGE" block in `__main__`.
+"""
+
 import sys
-import argparse
+import requests
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional
-import requests
-import psycopg2
-from psycopg2.extras import execute_values
 import pytz
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import os
 
-# -------------------------------
-# Logging
-# -------------------------------
+# Configure logging with UTF-8 encoding to handle Unicode characters
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s [%(threadName)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('pipl_supabase_reporting.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
+logger = logging.getLogger(__name__)
 
-# -------------------------------
-# Env config
-# -------------------------------
-SUPABASE_DB_URL   = os.getenv("SUPABASE_DB_URL")
-PLUSVIBE_API_KEY  = os.getenv("PLUSVIBE_API_KEY", "").strip()
-REPORT_TZ         = os.getenv("REPORT_TZ", "America/New_York")
-PV_VERIFY_SSL     = os.getenv("PV_VERIFY_SSL", "true").strip().lower() not in ("0", "false", "no")
-_raw_base = os.getenv("PV_BASE_URL", "").strip()
-if not _raw_base:
-    _raw_base = "https://api.plusvibe.ai/api/v1"
-PV_BASE_URL = _raw_base.rstrip("/")
-if not PV_VERIFY_SSL:
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Set environment variable for UTF-8 output on Windows
+if os.name == 'nt':  # Windows
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
+# ─── Configuration ─────────────────────────────────────────────────────────────
+PIPL_API_KEY = "04c54bbe-679d49da-80156ac0-3f7212f8"
 
+# Supabase Database Configuration (from AMwise script)
+SUPABASE_DB_URL = "postgresql://postgres.auzoezucrrhrtmaucbbg:SB0dailyreporting@aws-1-us-east-2.pooler.supabase.com:6543/postgres"
 
-if not SUPABASE_DB_URL or not PLUSVIBE_API_KEY:
-    logging.error("Missing required env vars: SUPABASE_DB_URL or PLUSVIBE_API_KEY")
-    sys.exit(1)
+TABLE_NAME = "public.campaign_reporting"
+UNIQUE_FIELD = "campaign_date_key"
 
-# try both header conventions
-HEADERS_CANDIDATES = [
-    {"x-api-key": PLUSVIBE_API_KEY},
-    {"api-key": PLUSVIBE_API_KEY},
+# Actual Supabase table columns (based on discovered schema)
+ACTUAL_TABLE_COLUMNS = [
+    "campaign_date_key", "campaign_id", "parent_campaign_id", "campaign_name", 
+    "client_name", "status", "start_date", "end_date", "total_sent", 
+    "new_leads_reached", "replies_count", "positive_reply", "bounce_count", 
+    "reply_rate", "positive_reply_rate", "sequencer_platform", 
+    "inserted_at", "updated_at"
 ]
 
-# candidate endpoints by tenant
-WORKSPACES_PATHS = ["/authenticate", "/workspaces"]
-CAMPAIGNS_PATH   = "/campaign/list-all"  # observed working
-STATS_PATH       = "/analytics/campaign/stats"  # observed working
-
-# -------------------------------
-# Dates
-# -------------------------------
-def resolve_date_range(start_arg: Optional[str], end_arg: Optional[str]) -> Tuple[str, str]:
-    tz = pytz.timezone(REPORT_TZ)
-    today = datetime.now(tz).date()
-    if start_arg and end_arg:
-        return start_arg, end_arg
-    yday = today - timedelta(days=1)
-    return yday.isoformat(), yday.isoformat()
-
-# -------------------------------
-# DB
-# -------------------------------
-def upsert_rows(conn, rows: List[tuple]):
-    if not rows:
-        return
-    with conn.cursor() as cur:
-        sql = """
-        INSERT INTO campaign_reporting (
-            campaign_date_key, campaign_id, parent_campaign_id, campaign_name,
-            client_name, status, start_date, end_date,
-            total_email_sent, new_leads_reached, replies_count,
-            positive_reply, bounce_count, sequencer_platform
-        )
-        VALUES %s
-        ON CONFLICT (campaign_date_key) DO UPDATE SET
-            parent_campaign_id = EXCLUDED.parent_campaign_id,
-            campaign_name      = EXCLUDED.campaign_name,
-            client_name        = EXCLUDED.client_name,
-            status             = EXCLUDED.status,
-            total_email_sent   = EXCLUDED.total_email_sent,
-            new_leads_reached  = EXCLUDED.new_leads_reached,
-            replies_count      = EXCLUDED.replies_count,
-            positive_reply     = EXCLUDED.positive_reply,
-            bounce_count       = EXCLUDED.bounce_count,
-            sequencer_platform = EXCLUDED.sequencer_platform
-        """
-        execute_values(cur, sql, rows, page_size=500)
-    conn.commit()
-
-# -------------------------------
-# HTTP helpers
-# -------------------------------
-def _get_json(path: str, params: Dict = None) -> Dict:
-    url = f"{PV_BASE_URL}{path}"
-    last_err = None
-    for hdr in HEADERS_CANDIDATES:
-        try:
-            r = requests.get(url, headers=hdr, params=params or {}, timeout=60, verify=PV_VERIFY_SSL)
-            if r.status_code != 200:
-                last_err = RuntimeError(f"{r.status_code} {r.text[:200]}")
-                continue
-            logging.debug(f"GET {path} ok with headers {list(hdr.keys())[0]}")
-            return r.json()
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"GET {path} failed. last_err={last_err}")
-
-# -------------------------------
-# PV API with fallbacks
-# -------------------------------
-def get_workspaces() -> List[Dict]:
-    for p in WORKSPACES_PATHS:
-        try:
-            data = _get_json(p)
-            # shapes seen: {"workspaces":[{id,name,...},...]} or list of workspaces
-            if isinstance(data, dict) and "workspaces" in data and isinstance(data["workspaces"], list):
-                logging.info(f"Workspaces from {p}: {len(data['workspaces'])}")
-                return data["workspaces"]
-            if isinstance(data, list):
-                logging.info(f"Workspaces from {p}: {len(data)}")
-                return data
-        except Exception as e:
-            logging.warning(f"Workspace fetch via {p} failed: {e}")
-    return []
-
-def list_campaigns(ws_id: str, skip: int = 0, limit: int = 100) -> List[Dict]:
-    params = {"workspace_id": ws_id, "skip": skip, "limit": limit}
-    data = _get_json(CAMPAIGNS_PATH, params)
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        # tolerate shapes like {"campaigns":[...]} if tenant returns wrapped lists
-        if isinstance(data.get("campaigns"), list):
-            return data["campaigns"]
-    return []
-
-def fetch_campaign_metrics(ws_id: str, cid: str, start_date: str, end_date: Optional[str]) -> Dict[str, int]:
-    params = {"workspace_id": ws_id, "campaign_id": cid, "start_date": start_date}
-    if end_date:
-        params["end_date"] = end_date
-    data = _get_json(STATS_PATH, params)
-
-    # unwrap one level if wrapped
-    candidate = data
-    if isinstance(candidate, dict):
-        for key in ("data", "result", "stats", "payload"):
-            if key in candidate:
-                candidate = candidate[key]
-                break
-
-    # If the API returns a list of per-day or per-step buckets, sum them
-    if isinstance(candidate, list):
-        buckets = candidate
-    elif isinstance(candidate, dict) and isinstance(candidate.get("daily"), list):
-        buckets = candidate["daily"]
-    else:
-        buckets = None
-
-    def to_int(v):
-        try:
-            return int(v)
-        except Exception:
-            try:
-                return int(float(v))
-            except Exception:
-                return 0
-
-    # alias map per metric
-    alias = {
-        "sent":       ["sent", "emails_sent", "emailsSent", "total_sent"],
-        "new_leads":  ["new_leads", "newLeads", "new_contacts", "newContacts"],
-        "replies":    ["replies", "reply", "total_replies", "totalReplies"],
-        "positive":   ["positive", "positive_replies", "positiveReplies"],
-        "bounces":    ["bounces", "bounce", "bounced", "bounceCount", "bouncedCount"],
-    }
-
-    def extract_from_dict(d: dict) -> Dict[str, int]:
-        out = {"sent": 0, "new_leads": 0, "replies": 0, "positive": 0, "bounces": 0}
-        for k, names in alias.items():
-            for n in names:
-                if n in d:
-                    out[k] = to_int(d.get(n))
-                    break
-        return out
-
-    if buckets is not None:
-        agg = {"sent": 0, "new_leads": 0, "replies": 0, "positive": 0, "bounces": 0}
-        for item in buckets:
-            if isinstance(item, dict):
-                vals = extract_from_dict(item)
-                for k in agg:
-                    agg[k] += vals[k]
-        chosen = agg
-    elif isinstance(candidate, dict):
-        chosen = extract_from_dict(candidate)
-    else:
-        # Unknown shape: fail loud with short preview
-        raise RuntimeError(f"Unexpected metrics shape for {cid}: {type(candidate).__name__}")
-
-    return {
-        "total_email_sent": chosen["sent"],
-        "new_leads_reached": chosen["new_leads"],
-        "replies_count": chosen["replies"],
-        "positive_reply": chosen["positive"],
-        "bounce_count": chosen["bounces"],
-    }
-
-
-# -------------------------------
-# Main
-# -------------------------------
-def main(start_date: str, end_date: str):
-    logging.info(f"Fetching Pipl campaigns for {start_date} to {end_date}")
-    if not PV_VERIFY_SSL:
-        logging.warning("PV_VERIFY_SSL=false. TLS verification is disabled")
-
-    workspaces = get_workspaces()
-    logging.info(f"Total workspaces discovered: {len(workspaces)}")
-    if not workspaces:
-        raise RuntimeError("PV returned zero workspaces. Check API key, base URL, or header name")
-
-    rows: List[tuple] = []
-    processed = 0
-    skipped = 0
-    total_campaigns_seen = 0
-
-    with psycopg2.connect(SUPABASE_DB_URL) as conn:
-        for ws in workspaces:
-            # PV returns _id for workspaces. Use that when present.
-            ws_id = str(ws.get("id") or ws.get("workspace_id") or ws.get("_id") or "").strip()
-            ws_name = ws.get("name") or ws.get("workspace_name") or "Unknown"
-            logging.info(f"Workspace: name={ws_name} id={ws_id}")
-            if not ws_id:
-                logging.warning(f"Workspace has no usable id fields, emitting name only: {ws_name}")
-                # still proceed with name-only if the API allows listing without id; otherwise continue
-
-                continue
-
-            skip = 0
-            batch = 100
-            while True:
-                try:
-                    camps = list_campaigns(ws_id, skip=skip, limit=batch)
-                except Exception as e:
-                    logging.error(f"Failed listing campaigns for workspace {ws_id}: {e}")
-                    break
-
-                count = len(camps)
-                total_campaigns_seen += count
-                logging.info(f"Workspace {ws_name} ({ws_id}) campaigns batch size={count} skip={skip}")
-
-                if count == 0:
-                    break
-
-                for camp in camps:
-                    try:
-                        cid = str(camp.get("id") or camp.get("campaign_id") or camp.get("_id") or "").strip()
-                        if not cid:
-                            continue
-
-                        metrics = fetch_campaign_metrics(ws_id, cid, start_date, end_date)
-                        if (
-                            metrics["total_email_sent"] == 0
-                            and metrics["replies_count"] == 0
-                            and metrics["new_leads_reached"] == 0
-                        ):
-                            # one lightweight peek at the raw shape to help debug schemas that return zeros
-                            if processed < 3:  # do not spam
-                                logging.info(f"Zeroed metrics for campaign {cid} in ws {ws_name}. If unexpected, the API may be using different keys.")
-                            skipped += 1
-                            continue
-
-                        # Metrics must be ints. If any unexpected type slips through, coerce or raise.
-                        for k in ("total_email_sent", "new_leads_reached", "replies_count", "positive_reply", "bounce_count"):
-                            try:
-                                metrics[k] = int(metrics.get(k, 0))
-                            except Exception:
-                                raise RuntimeError(f"Non-integer metric {k} for campaign {cid}: {metrics.get(k)}")
-
-
-                        if (
-                            metrics["total_email_sent"] == 0
-                            and metrics["replies_count"] == 0
-                            and metrics["new_leads_reached"] == 0
-                        ):
-                            skipped += 1
-                            continue
-
-                        row = (
-                            f"{start_date}_{cid}_{end_date}",
-                            cid,
-                            camp.get("parent_campaign_id"),
-                            camp.get("name") or "",
-                            ws_name,
-                            camp.get("status") or "",
-                            start_date,
-                            end_date,
-                            metrics["total_email_sent"],
-                            metrics["new_leads_reached"],
-                            metrics["replies_count"],
-                            metrics["positive_reply"],
-                            metrics["bounce_count"],
-                            "PV",
-                        )
-                        
-                        if processed % 100 == 0:
-                            logging.info(f"Prepared rows: {processed}, skipped {skipped}")
-
-                        rows.append(row)
-                        processed += 1
-                        if processed % 100 == 0:
-                            logging.info(f"Processed {processed} PV campaigns so far (skipped {skipped})")
-                    except Exception as e:
-                        logging.error(f"PV campaign {camp.get('id')} failed: {e}")
-
-                if count < batch:
-                    break
-                skip += batch
-
-        if rows:
-            upsert_rows(conn, rows)
-
-    logging.info(f"Finished PV. Workspaces={len(workspaces)}, campaigns_seen={total_campaigns_seen}, inserted_or_updated={processed}, skipped={skipped}")
-
-# -------------------------------
-# Entrypoint
-# -------------------------------
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--start", help="YYYY-MM-DD")
-    parser.add_argument("--end", help="YYYY-MM-DD")
-    args = parser.parse_args()
-
-    start_date, end_date = resolve_date_range(args.start, args.end)
+# ─── Pipl API Helpers ─────────────────────────────────────────────────────────
+def get_workspaces():
+    """Fetch available workspaces from Pipl API"""
+    logger.info("Fetching workspaces from Pipl API...")
+    
     try:
-        main(start_date, end_date)
+        response = requests.get(
+            "https://api.plusvibe.ai/api/v1/authenticate",
+            headers={"x-api-key": PIPL_API_KEY},
+            timeout=30
+        )
+        response.raise_for_status()
+        workspaces = response.json().get("workspaces", [])
+        logger.info(f"Successfully fetched {len(workspaces)} workspaces")
+        return workspaces
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching workspaces: {e}")
+        raise
     except Exception as e:
-        logging.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"Unexpected error fetching workspaces: {e}")
+        raise
+
+def list_campaigns(ws_id, skip=0, limit=100):
+    """Fetch campaigns for a workspace with pagination"""
+    logger.debug(f"Fetching campaigns for workspace {ws_id} (skip={skip}, limit={limit})")
+    
+    try:
+        response = requests.get(
+            "https://api.plusvibe.ai/api/v1/campaign/list-all",
+            headers={"x-api-key": PIPL_API_KEY},
+            params={"workspace_id": ws_id, "skip": skip, "limit": limit},
+            timeout=30
+        )
+        response.raise_for_status()
+        campaigns = response.json()
+        logger.debug(f"Fetched {len(campaigns)} campaigns for workspace {ws_id}")
+        return campaigns
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching campaigns for workspace {ws_id}: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error fetching campaigns for workspace {ws_id}: {e}")
+        raise
+
+def get_campaign_stats(ws_id, cid, start_date, end_date=None):
+    """Fetch campaign statistics for a specific date range"""
+    logger.debug(f"Fetching stats for campaign {cid} in workspace {ws_id} for date {start_date}")
+    
+    try:
+        params = {"workspace_id": ws_id, "campaign_id": cid, "start_date": start_date}
+        if end_date:
+            params["end_date"] = end_date
+            
+        response = requests.get(
+            "https://api.plusvibe.ai/api/v1/analytics/campaign/stats",
+            headers={"x-api-key": PIPL_API_KEY},
+            params=params,
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        stats = list(data.values()) if isinstance(data, dict) else data
+        logger.debug(f"Fetched {len(stats) if stats else 0} stats for campaign {cid}")
+        return stats
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching stats for campaign {cid}: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error fetching stats for campaign {cid}: {e}")
+        raise
+
+# ─── Database Helpers ─────────────────────────────────────────────────────────
+def connect_to_supabase():
+    """Establish connection to Supabase database"""
+    logger.info("Connecting to Supabase database...")
+    
+    try:
+        conn = psycopg2.connect(
+            SUPABASE_DB_URL,
+            cursor_factory=RealDictCursor
+        )
+        logger.info("Successfully connected to Supabase database")
+        return conn
+        
+    except psycopg2.Error as e:
+        logger.error(f"Failed to connect to Supabase database: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error connecting to database: {e}")
+        raise
+
+def discover_table_columns(conn):
+    """Discover available columns in the campaign_reporting table"""
+    logger.info("Discovering table schema...")
+    
+    try:
+        with conn.cursor() as cursor:
+            query = """
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'campaign_reporting'
+            ORDER BY ordinal_position
+            """
+            cursor.execute(query)
+            columns = cursor.fetchall()
+            
+            logger.info("Available columns in campaign_reporting table:")
+            for col in columns:
+                logger.info(f"  - {col['column_name']}: {col['data_type']}")
+                
+            return [col['column_name'] for col in columns]
+            
+    except Exception as e:
+        logger.error(f"Error discovering table columns: {e}")
+        raise
+
+def map_pipl_to_supabase(campaign_data, workspace_name, report_date):
+    """Map Pipl API data to actual Supabase table schema"""
+    camp_id = campaign_data['campaign'].get('id', '')
+    camp_name = campaign_data['campaign'].get('camp_name') or campaign_data['campaign'].get('name', '')
+    parent_camp_id = campaign_data['campaign'].get('parent_camp_id', '')
+    status = campaign_data['campaign'].get('status', '')
+    
+    stats = campaign_data['stats']
+    sent_count = stats.get('sent_count', 0)
+    replied_count = stats.get('replied_count', 0)
+    new_lead_contacted = stats.get('new_lead_contacted_count', 0)
+    positive_replies = stats.get('positive_reply_count', 0)
+    bounced_count = stats.get('bounced_count', 0)
+    
+    # Extract and format dates
+    start_date_str = stats.get('start_date', '').split('T')[0] if stats.get('start_date') else None
+    end_date_str = stats.get('end_date', '').split('T')[0] if stats.get('end_date') else None
+    
+    # Create unique key
+    date_key = f"{camp_id}_{report_date}"
+    
+    # Calculate rates (handle division by zero)
+    reply_rate = (replied_count / sent_count * 100) if sent_count > 0 else 0
+    positive_reply_rate = (positive_replies / replied_count * 100) if replied_count > 0 else 0
+    
+    # Current timestamp for inserted_at and updated_at
+    current_time = datetime.utcnow().isoformat()
+    
+    # Map to actual Supabase table schema (only existing columns)
+    mapped_data = {
+        "campaign_date_key": date_key,
+        "campaign_id": camp_id,
+        "parent_campaign_id": parent_camp_id,
+        "campaign_name": camp_name,
+        "client_name": workspace_name,
+        "status": status,
+        "start_date": start_date_str,
+        "end_date": end_date_str,
+        "total_sent": sent_count,
+        "new_leads_reached": new_lead_contacted,
+        "replies_count": replied_count,
+        "positive_reply": positive_replies,
+        "bounce_count": bounced_count,
+        "reply_rate": round(reply_rate, 2),
+        "positive_reply_rate": round(positive_reply_rate, 2),
+        "sequencer_platform": "PV",
+        "inserted_at": current_time,
+        "updated_at": current_time
+    }
+    
+    return mapped_data
+
+def upsert_campaign_data(conn, mapped_data):
+    """Upsert campaign data into Supabase using ON CONFLICT"""
+    try:
+        with conn.cursor() as cursor:
+            # Get available columns from mapped_data that exist in the table
+            columns = list(mapped_data.keys())
+            values_placeholder = ", ".join(f"%({col})s" for col in columns)
+            columns_list = ", ".join(columns)
+            
+            # Build UPDATE clause excluding the unique field but including updated_at
+            update_clauses = ", ".join(
+                f"{col} = EXCLUDED.{col}" for col in columns 
+                if col != UNIQUE_FIELD
+            )
+            
+            sql = f"""
+            INSERT INTO {TABLE_NAME} ({columns_list})
+            VALUES ({values_placeholder})
+            ON CONFLICT ({UNIQUE_FIELD}) DO UPDATE
+            SET {update_clauses};
+            """
+            
+            cursor.execute(sql, mapped_data)
+            conn.commit()
+            
+            logger.debug(f"Upserted campaign: {mapped_data[UNIQUE_FIELD]}")
+            
+    except Exception as e:
+        logger.error(f"Error upserting campaign {mapped_data.get(UNIQUE_FIELD, 'unknown')}: {e}")
+        conn.rollback()
+        raise
+
+# ─── Core Pipeline Runner ─────────────────────────────────────────────────────
+def run_for_date(report_date: str):
+    """Run the complete pipeline for a specific date"""
+    logger.info("=" * 60)
+    logger.info(f"Starting Pipl to Supabase pipeline for {report_date}")
+    logger.info("=" * 60)
+    
+    start_time = datetime.now()
+    total_campaigns_processed = 0
+    total_campaigns_upserted = 0
+    
+    # Connect to database
+    conn = connect_to_supabase()
+    
+    try:
+        # Discover table schema for debugging
+        available_columns = discover_table_columns(conn)
+        
+        # Fetch workspaces from Pipl
+        workspaces = get_workspaces()
+        logger.info(f"Processing {len(workspaces)} workspaces")
+        
+        # Process each workspace
+        for workspace in workspaces:
+            ws_id = workspace["_id"]
+            ws_name = workspace.get("name", f"Workspace_{ws_id}")
+            
+            logger.info(f"\nProcessing workspace: {ws_name} ({ws_id})")
+            
+            # Fetch campaigns for this workspace with pagination
+            skip = 0
+            workspace_campaigns_processed = 0
+            
+            while True:
+                campaigns = list_campaigns(ws_id, skip=skip)
+                if not campaigns:
+                    break
+                    
+                logger.info(f"  Processing batch of {len(campaigns)} campaigns (skip={skip})")
+                
+                # Process each campaign
+                for campaign in campaigns:
+                    campaign_id = campaign["id"]
+                    campaign_name = campaign.get("camp_name") or campaign.get("name", "Unknown")
+                    
+                    try:
+                        # Fetch campaign stats for the report date
+                        stats_list = get_campaign_stats(ws_id, campaign_id, report_date, report_date)
+                        
+                        if not stats_list:
+                            logger.debug(f"    No stats found for campaign {campaign_name} ({campaign_id})")
+                            continue
+                            
+                        # Process each stat entry
+                        for stats in stats_list:
+                            sent_count = stats.get("sent_count", 0)
+                            replied_count = stats.get("replied_count", 0)
+                            
+                            # Skip campaigns with no activity
+                            if sent_count <= 0 and replied_count <= 0:
+                                logger.debug(f"    Skipping inactive campaign {campaign_name}")
+                                continue
+                            
+                            # Combine campaign and stats data
+                            combined_data = {
+                                'campaign': campaign,
+                                'stats': stats
+                            }
+                            
+                            # Map to Supabase schema
+                            mapped_data = map_pipl_to_supabase(combined_data, ws_name, report_date)
+                            
+                            # Upsert to database
+                            upsert_campaign_data(conn, mapped_data)
+                            
+                            total_campaigns_upserted += 1
+                            workspace_campaigns_processed += 1
+                            
+                            logger.debug(f"    SUCCESS: Processed {campaign_name} ({campaign_id})")
+                            
+                    except Exception as e:
+                        logger.error(f"    ERROR: Processing campaign {campaign_name} ({campaign_id}): {e}")
+                        continue
+                
+                total_campaigns_processed += len(campaigns)
+                skip += len(campaigns)
+                
+                # Break if we got fewer campaigns than the limit (end of pagination)
+                if len(campaigns) < 100:
+                    break
+            
+            logger.info(f"  Workspace summary: {workspace_campaigns_processed} campaigns upserted")
+        
+        # Pipeline completion summary
+        end_time = datetime.now()
+        duration = end_time - start_time
+        
+        logger.info(f"\n" + "=" * 60)
+        logger.info(f"Pipeline completed successfully for {report_date}")
+        logger.info(f"Total campaigns processed: {total_campaigns_processed}")
+        logger.info(f"Total campaigns upserted: {total_campaigns_upserted}")
+        logger.info(f"Execution time: {duration}")
+        logger.info("=" * 60)
+        
+    except Exception as e:
+        logger.error(f"Pipeline failed for {report_date}: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            logger.info("Database connection closed")
+
+# ─── Entry Point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    logger.info("Pipl to Supabase Daily Reporting Script Started")
+    
+    try:
+        # --- SINGLE DATE MODE (default: yesterday IST) ---
+        IST = pytz.timezone("Asia/Kolkata")
+        yesterday = datetime.now(IST) - timedelta(days=1)
+        run_for_date(yesterday.strftime("%Y-%m-%d"))
+
+        # --- BULK RANGE MODE (uncomment to activate) ---
+        # from_date = datetime(2025, 7, 23)
+        # to_date = datetime(2025, 7, 31)
+        # current = from_date
+        
+        # while current <= to_date:
+        #     try:
+        #         run_for_date(current.strftime("%Y-%m-%d"))
+        #     except Exception as e:
+        #         logger.error(f"Failed to process date {current.strftime('%Y-%m-%d')}: {e}")
+        #         # Continue with next date instead of failing completely
+        #         continue
+        #     current += timedelta(days=1)
+            
+        logger.info("All dates processed successfully!")
+        
+    except KeyboardInterrupt:
+        logger.info("Script interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Script failed with error: {e}")
         sys.exit(1)
