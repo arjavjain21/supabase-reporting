@@ -376,22 +376,22 @@ if __name__ == "__main__":
     try:
         # --- SINGLE DATE MODE (default: yesterday IST) ---
         IST = pytz.timezone("Asia/Kolkata")
-        yesterday = datetime.now(IST) - timedelta(days=1)
-        run_for_date(yesterday.strftime("%Y-%m-%d"))
+        # yesterday = datetime.now(IST) - timedelta(days=1)
+        # run_for_date(yesterday.strftime("%Y-%m-%d"))
 
         # --- BULK RANGE MODE (uncomment to activate) ---
-        # from_date = datetime(2025, 7, 23)
-        # to_date = datetime(2025, 7, 31)
-        # current = from_date
+        from_date = datetime(2025, 6, 1)
+        to_date = datetime(2025, 7, 15)
+        current = from_date
         
-        # while current <= to_date:
-        #     try:
-        #         run_for_date(current.strftime("%Y-%m-%d"))
-        #     except Exception as e:
-        #         logger.error(f"Failed to process date {current.strftime('%Y-%m-%d')}: {e}")
-        #         # Continue with next date instead of failing completely
-        #         continue
-        #     current += timedelta(days=1)
+        while current <= to_date:
+            try:
+                run_for_date(current.strftime("%Y-%m-%d"))
+            except Exception as e:
+                logger.error(f"Failed to process date {current.strftime('%Y-%m-%d')}: {e}")
+                # Continue with next date instead of failing completely
+                continue
+            current += timedelta(days=1)
             
         logger.info("All dates processed successfully!")
         
