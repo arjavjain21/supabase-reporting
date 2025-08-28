@@ -22,7 +22,7 @@ jobs:
       uses: actions/checkout@v4
       
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
         
@@ -84,12 +84,24 @@ jobs:
     - name: Run Pipl Daily Reporting
       env:
         DATE_OVERRIDE: ${{ github.event.inputs.date_override }}
+        PIPL_API_KEY: ${{ secrets.PIPL_API_KEY || '04c54bbe-679d49da-80156ac0-3f7212f8' }}
       run: |
         python pipl_daily_runner.py
         
+    - name: Check if log file exists
+      id: check_log
+      run: |
+        if [ -f "pipl_supabase_reporting.log" ]; then
+          echo "log_exists=true" >> $GITHUB_OUTPUT
+          echo "Log file found"
+        else
+          echo "log_exists=false" >> $GITHUB_OUTPUT
+          echo "Warning: Log file not found"
+        fi
+        
     - name: Upload logs as artifact
-      uses: actions/upload-artifact@v3
-      if: always()  # Upload logs even if the job fails
+      uses: actions/upload-artifact@v4
+      if: always() && steps.check_log.outputs.log_exists == 'true'
       with:
         name: pipl-reporting-logs-${{ github.run_number }}
         path: pipl_supabase_reporting.log
