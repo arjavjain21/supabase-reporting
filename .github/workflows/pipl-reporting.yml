@@ -1,165 +1,165 @@
-name: Pipl Daily Reporting
+# name: Pipl Daily Reporting
 
-on:
-  schedule:
-    # Runs at 00:10 AM EST (05:10 AM UTC) every day
-    - cron: '10 5 * * *'
+# on:
+#   schedule:
+#     # Runs at 00:10 AM EST (05:10 AM UTC) every day
+#     - cron: '10 5 * * *'
   
-  # Allow manual triggering
-  workflow_dispatch:
-    inputs:
-      date_override:
-        description: 'Override date (YYYY-MM-DD format, optional)'
-        required: false
-        type: string
+#   # Allow manual triggering
+#   workflow_dispatch:
+#     inputs:
+#       date_override:
+#         description: 'Override date (YYYY-MM-DD format, optional)'
+#         required: false
+#         type: string
 
-jobs:
-  pipl-reporting:
-    runs-on: ubuntu-latest
+# jobs:
+#   pipl-reporting:
+#     runs-on: ubuntu-latest
     
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+#     steps:
+#     - name: Checkout repository
+#       uses: actions/checkout@v4
       
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.9'
+#     - name: Set up Python
+#       uses: actions/setup-python@v5
+#       with:
+#         python-version: '3.9'
         
-    - name: Update CA certificates
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y ca-certificates postgresql-client libpq-dev
-        sudo update-ca-certificates
+#     - name: Update CA certificates
+#       run: |
+#         sudo apt-get update
+#         sudo apt-get install -y ca-certificates postgresql-client libpq-dev
+#         sudo update-ca-certificates
         
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install psycopg2-binary requests pytz certifi urllib3
+#     - name: Install Python dependencies
+#       run: |
+#         python -m pip install --upgrade pip
+#         pip install psycopg2-binary requests pytz certifi urllib3
         
-    - name: Verify SSL setup
-      run: |
-        python -c "import ssl, certifi; print(f'SSL version: {ssl.OPENSSL_VERSION}'); print(f'Certifi bundle: {certifi.where()}')"
-        curl -I https://api.plusvibe.ai/api/v1/authenticate || echo "Direct curl failed, but Python requests might work with proper SSL handling"
+#     - name: Verify SSL setup
+#       run: |
+#         python -c "import ssl, certifi; print(f'SSL version: {ssl.OPENSSL_VERSION}'); print(f'Certifi bundle: {certifi.where()}')"
+#         curl -I https://api.plusvibe.ai/api/v1/authenticate || echo "Direct curl failed, but Python requests might work with proper SSL handling"
         
-    - name: Create modified script for single date execution
-      run: |
-        cat > pipl_daily_runner.py << 'EOF'
-        #!/usr/bin/env python3
-        """
-        Daily runner for Pipl reporting - runs for yesterday by default
-        """
-        import sys
-        import os
-        from datetime import datetime, timedelta
-        import pytz
+#     - name: Create modified script for single date execution
+#       run: |
+#         cat > pipl_daily_runner.py << 'EOF'
+#         #!/usr/bin/env python3
+#         """
+#         Daily runner for Pipl reporting - runs for yesterday by default
+#         """
+#         import sys
+#         import os
+#         from datetime import datetime, timedelta
+#         import pytz
         
-        # Add the current directory to Python path
-        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+#         # Add the current directory to Python path
+#         sys.path.append(os.path.dirname(os.path.abspath(__file__)))
         
-        # Import the main script functions - adjust the import name to match your actual file
-        # Try different possible script names
-        try:
-            from PV_daily_reporting import run_for_date, logger
-        except ImportError:
-            try:
-                # If the script has a different name, try these
-                import pipl_script
-                run_for_date = pipl_script.run_for_date
-                logger = pipl_script.logger
-            except ImportError:
-                # As a fallback, try to import from any Python file in the current directory
-                import glob
-                python_files = glob.glob("*.py")
-                for py_file in python_files:
-                    if py_file.startswith("PV_") or "pipl" in py_file.lower():
-                        module_name = py_file[:-3]  # Remove .py extension
-                        try:
-                            module = __import__(module_name)
-                            run_for_date = getattr(module, 'run_for_date')
-                            logger = getattr(module, 'logger')
-                            print(f"Successfully imported from {module_name}")
-                            break
-                        except (ImportError, AttributeError):
-                            continue
-                else:
-                    raise ImportError("Could not find the main Pipl script to import")
+#         # Import the main script functions - adjust the import name to match your actual file
+#         # Try different possible script names
+#         try:
+#             from PV_daily_reporting import run_for_date, logger
+#         except ImportError:
+#             try:
+#                 # If the script has a different name, try these
+#                 import pipl_script
+#                 run_for_date = pipl_script.run_for_date
+#                 logger = pipl_script.logger
+#             except ImportError:
+#                 # As a fallback, try to import from any Python file in the current directory
+#                 import glob
+#                 python_files = glob.glob("*.py")
+#                 for py_file in python_files:
+#                     if py_file.startswith("PV_") or "pipl" in py_file.lower():
+#                         module_name = py_file[:-3]  # Remove .py extension
+#                         try:
+#                             module = __import__(module_name)
+#                             run_for_date = getattr(module, 'run_for_date')
+#                             logger = getattr(module, 'logger')
+#                             print(f"Successfully imported from {module_name}")
+#                             break
+#                         except (ImportError, AttributeError):
+#                             continue
+#                 else:
+#                     raise ImportError("Could not find the main Pipl script to import")
         
-        if __name__ == "__main__":
-            logger.info("Starting Pipl Daily Reporting via GitHub Actions")
+#         if __name__ == "__main__":
+#             logger.info("Starting Pipl Daily Reporting via GitHub Actions")
             
-            try:
-                # Check if date override is provided via environment variable
-                date_override = os.environ.get('DATE_OVERRIDE', '').strip()
+#             try:
+#                 # Check if date override is provided via environment variable
+#                 date_override = os.environ.get('DATE_OVERRIDE', '').strip()
                 
-                if date_override:
-                    # Use provided date
-                    report_date = date_override
-                    logger.info(f"Using override date: {report_date}")
-                else:
-                    # Use yesterday in IST timezone
-                    IST = pytz.timezone("Asia/Kolkata")
-                    yesterday = datetime.now(IST) - timedelta(days=1)
-                    report_date = yesterday.strftime("%Y-%m-%d")
-                    logger.info(f"Using yesterday's date (IST): {report_date}")
+#                 if date_override:
+#                     # Use provided date
+#                     report_date = date_override
+#                     logger.info(f"Using override date: {report_date}")
+#                 else:
+#                     # Use yesterday in IST timezone
+#                     IST = pytz.timezone("Asia/Kolkata")
+#                     yesterday = datetime.now(IST) - timedelta(days=1)
+#                     report_date = yesterday.strftime("%Y-%m-%d")
+#                     logger.info(f"Using yesterday's date (IST): {report_date}")
                 
-                # Run the pipeline
-                run_for_date(report_date)
-                logger.info("Pipl daily reporting completed successfully")
+#                 # Run the pipeline
+#                 run_for_date(report_date)
+#                 logger.info("Pipl daily reporting completed successfully")
                 
-            except Exception as e:
-                logger.error(f"Pipl daily reporting failed: {e}")
-                import traceback
-                traceback.print_exc()
-                sys.exit(1)
-        EOF
+#             except Exception as e:
+#                 logger.error(f"Pipl daily reporting failed: {e}")
+#                 import traceback
+#                 traceback.print_exc()
+#                 sys.exit(1)
+#         EOF
         
-    - name: List Python files for debugging
-      run: |
-        echo "Python files in repository:"
-        find . -name "*.py" -type f | head -10
+#     - name: List Python files for debugging
+#       run: |
+#         echo "Python files in repository:"
+#         find . -name "*.py" -type f | head -10
         
-    - name: Run Pipl Daily Reporting
-      env:
-        DATE_OVERRIDE: ${{ github.event.inputs.date_override }}
-        PIPL_API_KEY: ${{ secrets.PIPL_API_KEY || '04c54bbe-679d49da-80156ac0-3f7212f8' }}
-        PYTHONHTTPSVERIFY: '1'  # Enable SSL verification
-        REQUESTS_CA_BUNDLE: ''  # Let requests use system certificates
-        CURL_CA_BUNDLE: ''      # Let curl use system certificates
-      run: |
-        python pipl_daily_runner.py
+#     - name: Run Pipl Daily Reporting
+#       env:
+#         DATE_OVERRIDE: ${{ github.event.inputs.date_override }}
+#         PIPL_API_KEY: ${{ secrets.PIPL_API_KEY || '04c54bbe-679d49da-80156ac0-3f7212f8' }}
+#         PYTHONHTTPSVERIFY: '1'  # Enable SSL verification
+#         REQUESTS_CA_BUNDLE: ''  # Let requests use system certificates
+#         CURL_CA_BUNDLE: ''      # Let curl use system certificates
+#       run: |
+#         python pipl_daily_runner.py
         
-    - name: Check if log file exists
-      id: check_log
-      run: |
-        if [ -f "pipl_supabase_reporting.log" ]; then
-          echo "log_exists=true" >> $GITHUB_OUTPUT
-          echo "Log file found"
-          echo "Last 20 lines of log:"
-          tail -20 pipl_supabase_reporting.log
-        else
-          echo "log_exists=false" >> $GITHUB_OUTPUT
-          echo "Warning: Log file not found"
-        fi
+#     - name: Check if log file exists
+#       id: check_log
+#       run: |
+#         if [ -f "pipl_supabase_reporting.log" ]; then
+#           echo "log_exists=true" >> $GITHUB_OUTPUT
+#           echo "Log file found"
+#           echo "Last 20 lines of log:"
+#           tail -20 pipl_supabase_reporting.log
+#         else
+#           echo "log_exists=false" >> $GITHUB_OUTPUT
+#           echo "Warning: Log file not found"
+#         fi
         
-    - name: Upload logs as artifact
-      uses: actions/upload-artifact@v4
-      if: always() && steps.check_log.outputs.log_exists == 'true'
-      with:
-        name: pipl-reporting-logs-${{ github.run_number }}
-        path: pipl_supabase_reporting.log
-        retention-days: 30
+#     - name: Upload logs as artifact
+#       uses: actions/upload-artifact@v4
+#       if: always() && steps.check_log.outputs.log_exists == 'true'
+#       with:
+#         name: pipl-reporting-logs-${{ github.run_number }}
+#         path: pipl_supabase_reporting.log
+#         retention-days: 30
         
-    - name: Notify on failure
-      if: failure()
-      run: |
-        echo "❌ Pipl daily reporting failed. Check the logs for details."
-        echo "📋 Log artifact will be available in the Actions tab."
-        echo "🔗 SSL troubleshooting: Check if api.plusvibe.ai certificate is valid"
+#     - name: Notify on failure
+#       if: failure()
+#       run: |
+#         echo "❌ Pipl daily reporting failed. Check the logs for details."
+#         echo "📋 Log artifact will be available in the Actions tab."
+#         echo "🔗 SSL troubleshooting: Check if api.plusvibe.ai certificate is valid"
         
-    - name: Display summary
-      if: success()
-      run: |
-        echo "✅ Pipl daily reporting completed successfully"
-        echo "📊 Log file: pipl_supabase_reporting.log"
-        echo "🗓️ Report date: $(date -d 'yesterday' '+%Y-%m-%d')"
+#     - name: Display summary
+#       if: success()
+#       run: |
+#         echo "✅ Pipl daily reporting completed successfully"
+#         echo "📊 Log file: pipl_supabase_reporting.log"
+#         echo "🗓️ Report date: $(date -d 'yesterday' '+%Y-%m-%d')"
