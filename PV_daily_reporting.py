@@ -19,6 +19,13 @@ import pytz
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import ssl
+
+# Disable SSL warnings when verification is disabled
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging with UTF-8 encoding to handle Unicode characters
 logging.basicConfig(
@@ -36,7 +43,7 @@ if os.name == 'nt':  # Windows
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-PIPL_API_KEY = "04c54bbe-679d49da-80156ac0-3f7212f8"
+PIPL_API_KEY = os.getenv("PIPL_API_KEY", "04c54bbe-679d49da-80156ac0-3f7212f8")
 
 # Supabase Database Configuration (from AMwise script)
 SUPABASE_DB_URL = "postgresql://postgres.auzoezucrrhrtmaucbbg:SB0dailyreporting@aws-1-us-east-2.pooler.supabase.com:6543/postgres"
@@ -53,13 +60,50 @@ ACTUAL_TABLE_COLUMNS = [
     "inserted_at", "updated_at"
 ]
 
+# ─── HTTP Session with SSL and Retry Configuration ─────────────────────────────
+def create_http_session():
+    """Create a requests session with proper SSL handling and retries"""
+    session = requests.Session()
+    
+    # Configure retry strategy
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
+    )
+    
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    # Handle SSL issues in CI environments
+    if os.getenv('GITHUB_ACTIONS') == 'true' or os.getenv('CI') == 'true':
+        logger.warning("Running in CI environment - configuring SSL handling")
+        # Try to use system certificates first
+        try:
+            import certifi
+            session.verify = certifi.where()
+            logger.info("Using certifi certificate bundle")
+        except ImportError:
+            logger.warning("certifi not available, using requests default")
+            # If still failing, we might need to disable SSL verification
+            # This should be a last resort
+            session.verify = False
+            logger.warning("SSL verification disabled for CI compatibility")
+    
+    return session
+
+# Global session instance
+http_session = create_http_session()
+
 # ─── Pipl API Helpers ─────────────────────────────────────────────────────────
 def get_workspaces():
     """Fetch available workspaces from Pipl API"""
     logger.info("Fetching workspaces from Pipl API...")
     
     try:
-        response = requests.get(
+        response = http_session.get(
             "https://api.plusvibe.ai/api/v1/authenticate",
             headers={"x-api-key": PIPL_API_KEY},
             timeout=30
@@ -81,7 +125,7 @@ def list_campaigns(ws_id, skip=0, limit=100):
     logger.debug(f"Fetching campaigns for workspace {ws_id} (skip={skip}, limit={limit})")
     
     try:
-        response = requests.get(
+        response = http_session.get(
             "https://api.plusvibe.ai/api/v1/campaign/list-all",
             headers={"x-api-key": PIPL_API_KEY},
             params={"workspace_id": ws_id, "skip": skip, "limit": limit},
@@ -108,7 +152,7 @@ def get_campaign_stats(ws_id, cid, start_date, end_date=None):
         if end_date:
             params["end_date"] = end_date
             
-        response = requests.get(
+        response = http_session.get(
             "https://api.plusvibe.ai/api/v1/analytics/campaign/stats",
             headers={"x-api-key": PIPL_API_KEY},
             params=params,
@@ -376,24 +420,24 @@ if __name__ == "__main__":
     try:
         # --- SINGLE DATE MODE (default: yesterday IST) ---
         IST = pytz.timezone("Asia/Kolkata")
-        # yesterday = datetime.now(IST) - timedelta(days=1)
-        # run_for_date(yesterday.strftime("%Y-%m-%d"))
+        yesterday = datetime.now(IST) - timedelta(days=1)
+        run_for_date(yesterday.strftime("%Y-%m-%d"))
 
         # --- BULK RANGE MODE (uncomment to activate) ---
-        from_date = datetime(2025, 6, 1)
-        to_date = datetime(2025, 7, 15)
-        current = from_date
+        # from_date = datetime(2025, 6, 1)
+        # to_date = datetime(2025, 7, 15)
+        # current = from_date
         
-        while current <= to_date:
-            try:
-                run_for_date(current.strftime("%Y-%m-%d"))
-            except Exception as e:
-                logger.error(f"Failed to process date {current.strftime('%Y-%m-%d')}: {e}")
-                # Continue with next date instead of failing completely
-                continue
-            current += timedelta(days=1)
+        # while current <= to_date:
+        #     try:
+        #         run_for_date(current.strftime("%Y-%m-%d"))
+        #     except Exception as e:
+        #         logger.error(f"Failed to process date {current.strftime('%Y-%m-%d')}: {e}")
+        #         # Continue with next date instead of failing completely
+        #         continue
+        #     current += timedelta(days=1)
             
-        logger.info("All dates processed successfully!")
+        logger.info("Daily reporting completed successfully!")
         
     except KeyboardInterrupt:
         logger.info("Script interrupted by user")
