@@ -1,0 +1,33 @@
+name: PV Daily Reporting
+
+on:
+  schedule:
+    - cron: "15 18 * * *"  # runs at 18:15 UTC which is 23:45 IST
+  workflow_dispatch: {}
+
+jobs:
+  run-daily:
+    runs-on: ubuntu-latest
+    env:
+      PIPL_API_KEY: ${{ secrets.PIPL_API_KEY }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # Optional: point to a custom CA bundle if you use a private proxy or non-standard chain
+      # PV_CA_BUNDLE: ${{ secrets.PV_CA_BUNDLE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -c "import certifi,sys; print('certifi CA:', certifi.where())"
+
+      - name: Run daily reporting
+        run: |
+          python PV_daily_reporting.py
