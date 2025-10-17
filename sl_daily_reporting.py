@@ -313,18 +313,71 @@ def fetch_campaign_metrics(c: Dict[str, Any], start_date: str, end_date: str) ->
 # ------------------------------
 # Database
 # ------------------------------
+import time
+import psycopg2
+
+def _pool_connect_kwargs(dsn: str):
+    # libpq parameters work via DSN or kwargs. We add keepalives here.
+    return dict(
+        dsn=dsn,
+        connect_timeout=20,
+        sslmode="require",
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+        application_name="sl_daily_reporting",
+    )
+
 def init_pool():
-    if not DB_DSN:
-        raise RuntimeError("SUPABASE_DB_URL or PG_DSN is not set")
-    import psycopg2
-    from psycopg2.pool import ThreadedConnectionPool
-    # Ensure sslmode=require present
-    dsn = DB_DSN
-    if "sslmode" not in dsn:
-        sep = "&" if "?" in dsn else "?"
-        dsn = f"{dsn}{sep}sslmode=require"
-    pool = ThreadedConnectionPool(1, max(WORKER_THREADS, 8), dsn)
-    return pool
+    dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("SUPABASE_DSN")
+    if not dsn:
+        raise RuntimeError("Missing SUPABASE_DB_URL")
+
+    maxsize = max(int(os.environ.get("WORKER_THREADS", "8")), 8)
+
+    attempts = 5
+    delay = 3.0
+    last_err = None
+    for i in range(1, attempts + 1):
+        try:
+            kw = _pool_connect_kwargs(dsn)
+            pool = ThreadedConnectionPool(1, maxsize, **kw)
+            # smoke test one connection so we fail fast if pool is broken
+            conn = pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+                    _ = cur.fetchone()
+            finally:
+                pool.putconn(conn)
+            logging.info(f"DB pool ready: size=1..{maxsize} (attempt {i})")
+            return pool
+        except Exception as e:
+            last_err = e
+            logging.warning(f"Pool init attempt {i}/{attempts} failed: {e}. Retrying in {delay:.1f}s")
+            time.sleep(delay)
+            delay *= 1.7
+
+    # Final fallback: single connection mode so the run can still proceed
+    logging.error(f"Pool init failed after {attempts} attempts: {last_err}. Falling back to single-connection mode")
+    kw = _pool_connect_kwargs(dsn)
+    conn = psycopg2.connect(**kw)
+    # Wrap a shim that exposes getconn/putconn for the rest of the code
+    class _SingleConnPool:
+        def __init__(self, conn):
+            self._c = conn
+        def getconn(self):
+            return self._c
+        def putconn(self, _c):
+            return
+        def closeall(self):
+            try:
+                self._c.close()
+            except Exception:
+                pass
+    return _SingleConnPool(conn)
+
 
 def upsert_row(conn, row: Dict[str, Any]):
     from psycopg2.extras import execute_values
