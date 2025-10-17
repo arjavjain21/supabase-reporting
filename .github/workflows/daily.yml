@@ -76,3 +76,15 @@ jobs:
           path: |
             sl_daily_reporting.log
             sl_daily_reporting.log.*
+
+      - name: Run SmartLead daily reporting with retry
+        run: |
+          set -e
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            python sl_daily_reporting.py && break || {
+              rc=$?
+              echo "Run failed with code $rc. Sleeping $((i*20))s and retrying..."
+              sleep $((i*20))
+            }
+          done
