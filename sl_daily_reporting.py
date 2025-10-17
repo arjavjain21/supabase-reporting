@@ -35,6 +35,10 @@ from logging.handlers import RotatingFileHandler
 from email.message import EmailMessage
 from typing import Dict, Any, List, Tuple, Optional
 
+import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
+
+
 # ------------------------------
 # Configuration via env
 # ------------------------------
