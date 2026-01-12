@@ -1,90 +1,90 @@
-name: Daily Smartlead Reporting
+# name: Daily Smartlead Reporting
 
-on:
-  schedule:
-    - cron: '5 4 * * *'   # 00:05 EDT daily
-  workflow_dispatch:
-    inputs:
-      start:
-        description: 'Start date YYYY-MM-DD (optional)'
-        required: false
-      end:
-        description: 'End date YYYY-MM-DD (optional)'
-        required: false
+# on:
+#   schedule:
+#     - cron: '5 4 * * *'   # 00:05 EDT daily
+#   workflow_dispatch:
+#     inputs:
+#       start:
+#         description: 'Start date YYYY-MM-DD (optional)'
+#         required: false
+#       end:
+#         description: 'End date YYYY-MM-DD (optional)'
+#         required: false
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    concurrency:
-      group: daily-smartlead
-      cancel-in-progress: false
-    env:
-      # non-sensitive repo Variables
-      REPORT_TZ: ${{ vars.REPORT_TZ }}
-      WORKER_THREADS: ${{ vars.WORKER_THREADS }}
-      RATE_LIMIT_REQUESTS: ${{ vars.RATE_LIMIT_REQUESTS }}
-      RATE_LIMIT_SECONDS: ${{ vars.RATE_LIMIT_SECONDS }}
-      SHEET_DOCUMENT_ID: ${{ vars.SHEET_DOCUMENT_ID }}
-      SHEET_RANGE: ${{ vars.SHEET_RANGE }}
+# jobs:
+#   run:
+#     runs-on: ubuntu-latest
+#     concurrency:
+#       group: daily-smartlead
+#       cancel-in-progress: false
+#     env:
+#       # non-sensitive repo Variables
+#       REPORT_TZ: ${{ vars.REPORT_TZ }}
+#       WORKER_THREADS: ${{ vars.WORKER_THREADS }}
+#       RATE_LIMIT_REQUESTS: ${{ vars.RATE_LIMIT_REQUESTS }}
+#       RATE_LIMIT_SECONDS: ${{ vars.RATE_LIMIT_SECONDS }}
+#       SHEET_DOCUMENT_ID: ${{ vars.SHEET_DOCUMENT_ID }}
+#       SHEET_RANGE: ${{ vars.SHEET_RANGE }}
 
-      # Manual backfill path with inputs
-      START_DATE: ${{ github.event.inputs.start }}
-      END_DATE: ${{ github.event.inputs.end }}
+#       # Manual backfill path with inputs
+#       START_DATE: ${{ github.event.inputs.start }}
+#       END_DATE: ${{ github.event.inputs.end }}
       
-      # sensitive repo Secrets
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SMARTLEAD_API_KEY: ${{ secrets.SMARTLEAD_API_KEY }}
-      SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
-      GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
-    steps:
-      - uses: actions/checkout@v4
+#       # sensitive repo Secrets
+#       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+#       SMARTLEAD_API_KEY: ${{ secrets.SMARTLEAD_API_KEY }}
+#       SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+#       SMTP_USER: ${{ secrets.SMTP_USER }}
+#       SMTP_PASS: ${{ secrets.SMTP_PASS }}
+#       RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
+#       GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
+#       - name: Cache pip
+#         uses: actions/cache@v4
+#         with:
+#           path: ~/.cache/pip
+#           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+#           restore-keys: ${{ runner.os }}-pip-
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+#       - name: Install deps
+#         run: |
+#           python -m pip install --upgrade pip
+#           pip install -r requirements.txt
 
-      - name: Write Google SA to file if provided
-        if: ${{ env.GOOGLE_SA_JSON_BASE64 != '' }}
-        run: |
-          echo "${{ env.GOOGLE_SA_JSON_BASE64 }}" | base64 -d > "$GITHUB_WORKSPACE/sa.json"
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/sa.json" >> $GITHUB_ENV
+#       - name: Write Google SA to file if provided
+#         if: ${{ env.GOOGLE_SA_JSON_BASE64 != '' }}
+#         run: |
+#           echo "${{ env.GOOGLE_SA_JSON_BASE64 }}" | base64 -d > "$GITHUB_WORKSPACE/sa.json"
+#           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/sa.json" >> $GITHUB_ENV
 
-      - name: Run daily script
-        run: |
-          python sl_daily_reporting.py
+#       - name: Run daily script
+#         run: |
+#           python sl_daily_reporting.py
 
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-logs
-          path: |
-            sl_daily_reporting.log
-            sl_daily_reporting.log.*
+#       - name: Upload logs on failure
+#         if: failure()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: run-logs
+#           path: |
+#             sl_daily_reporting.log
+#             sl_daily_reporting.log.*
 
-      - name: Run SmartLead daily reporting with retry
-        run: |
-          set -e
-          for i in 1 2 3; do
-            echo "Attempt $i..."
-            python sl_daily_reporting.py && break || {
-              rc=$?
-              echo "Run failed with code $rc. Sleeping $((i*20))s and retrying..."
-              sleep $((i*20))
-            }
-          done
+#       - name: Run SmartLead daily reporting with retry
+#         run: |
+#           set -e
+#           for i in 1 2 3; do
+#             echo "Attempt $i..."
+#             python sl_daily_reporting.py && break || {
+#               rc=$?
+#               echo "Run failed with code $rc. Sleeping $((i*20))s and retrying..."
+#               sleep $((i*20))
+#             }
+#           done
